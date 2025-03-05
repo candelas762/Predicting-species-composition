@@ -5,14 +5,13 @@ This repository contains an R Markdown tutorial for modeling and predicting tree
 ## Repository Contents
 
 - `species_proportions_analysis.Rmd` – R Markdown file containing the full analysis pipeline.
-- `data/` – Folder containing training and validation datasets.
 - `README.md` – This file, providing an overview of the repository.
 
 ## Data description
 
-The datasets used in this analysis include:
-- **Sample plot dataset** (`data/sample_plot_dataset.csv`) - Training data containing field-measured species proportions and remote sensing-derived predictors.
-- **Validation plot dataset** (`data/validation_plot_dataset.csv`) - Independent dataset used to assess model performance.
+The datasets used in this analysis should include:
+- **Sample plot dataset** - Training data containing field-measured species proportions and remote sensing-derived predictors.
+- **Validation plot dataset** - Independent dataset used to assess model performance.
 
 ## Methodology Overview
 
