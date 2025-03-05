@@ -1,6 +1,6 @@
 # Model and Predict Species Proportions
 
-This repository contains an R Markdown tutorial for modeling and predicting tree species proportions using remote sensing data. The methodology leverages **airborne laser scanning (ALS) and Sentinel-2 imagery**, combined with **Random Forest regression**, to estimate species proportions at the stand level.
+This repository contains an R Markdown tutorial for modeling and predicting tree species proportions using remote sensing data. The methodology combines **airborne laser scanning (ALS) and Sentinel-2 imagery**, toguether with **Random Forest modeling**, to predict species proportions at the stand level.
 
 ## Repository Contents
 
