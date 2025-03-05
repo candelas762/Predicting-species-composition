@@ -1,0 +1,221 @@
+---
+title: "Modeling and prediction of species proportions"
+author: "Jaime Candelas Bielza"
+date: "2025-03-01"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load Libraries
+```{r}
+library(dplyr)
+library(tidyr)
+library(randomForestSRC)
+library(ggplot2)
+```
+
+## Load Data
+
+Here, the training (sample plots) and test (independent validation plots) datasets are loaded. These datasets contain field-measured tree species proportions along with remote sensing-derived predictor variables.
+
+```{r}
+sp <- read.csv("PATH_TO_DATA/data/sample_plot_dataset.csv")
+vp <- read.csv("PATH_TO_DATA/data/validation_plot_dataset.csv")
+```
+
+
+# **Methodology Overview**
+
+This tutorial builds on prior research on species composition modeling using remote sensing data, particularly the integration of **airborne laser scanning (ALS) and Sentinel-2 imagery**. 
+
+
+## Prepare Data
+
+The remote sensing metrics used for modeling species proportions include:
+- **Airborne Laser Scanning (ALS) Metrics:**
+  - **Normalized Height Percentiles**: Height percentiles (H10, H20, ..., H90) were normalized by the maximum height (Hmax).
+  - **Canopy Density Metrics**: Proportions of laser returns at different height intervals.
+  - **Intensity Metrics**: Backscattered intensity measures from first and last ALS returns.
+- **Sentinel-2 Spectral Metrics:**
+  - **Raw Spectral Bands**: Bands from Sentinel-2.
+  - **Vegetation Indices**: NDVI, SAVI, MSR, and other indices capturing spectral responses of vegetation.
+  - **Seasonal Ratios**: Ratios between spectral bands and vegetation indices across different seasons to capture phenological differences.
+
+A detailed description of how ALS and Sentinel-2 metrics were calculated for each plot can be found in Candelas Bielza et al. (2024).
+
+Before training the model, we incorporate to the training dataset those variables we want to use for modeling. The test dataset is also aligned to match the training data structure.
+
+```{r}
+# Groups of metrics from remote sensing
+als_h = sp %>% select(starts_with("H") & ends_with(c(".F", ".L")))
+als_d = sp %>% select(starts_with("D") & ends_with(c(".F", ".L")))
+als_i = sp %>% select(starts_with("i") & ends_with(c(".F", ".L")), -contains("ground"))
+als_norm = sp %>% select(ends_with(c("_Norm")))
+
+s2 = sp %>% select(ends_with(c("_spring", "_summer", "_fall")))
+s2_ratio = sp %>% select(ends_with(c("_ratio")))
+
+# Group metrics we want to be used for modeling
+RS_metrics <- cbind(als_i, als_norm, s2, s2_ratio)
+
+# Select and drop columns of interest
+training_data <- sp %>% select(rV_s, rV_p, rV_d, all_of(colnames(RS_metrics)))
+test_data <- vp %>% select(rV_s, rV_p, rV_d, all_of(colnames(training_data)))
+
+```
+
+## Train Random Forest Model
+
+A multi-response Random Forest model is trained to predict tree species proportions (Spruce, Pine, and Deciduous) using airborne laser scanning and Sentinel-2 derived metrics. Random Forest is chosen due to its robustness in handling high-dimensional data and nonlinear relationships.
+
+The **random forest (RF)** model is used for species proportion estimation due to its ability to handle **high-dimensional data**, minimize overfitting, and implicitly select important variables **(Breiman, 2001; Bohlin et al., 2021)**. RF has been shown to achieve performance comparable to k-nearest neighbors (k-NN) and parametric models like Dirichlet regression in predicting species proportions **(Candelas Bielza et al., pending publication)**.
+
+Variable selection and parameter optimization is encouraged but for simplicity of this document, they were ommitted. More information on how to perform parameter optimization can be found in Candelas Bielza et al. (pending publication).
+
+```{r}
+set.seed(123)
+rf_model <- rfsrc(get.mv.formula(c("rV_s", "rV_p", "rV_d")), data = training_data)
+```
+
+## Predict on Validation Data
+
+Once the model is trained, we apply it to the validation dataset to generate predictions.
+
+```{r}
+PPyhat <- predict(rf_model, newdata = vp) %>% 
+  get.mv.predicted() %>% 
+  as.data.frame() %>% 
+  rename_with(~ c("rV_s_hat", "rV_p_hat", "rV_d_hat"), c("rV_s", "rV_p", "rV_d"))
+```
+
+## Classical Calibration (Lindgren et al., 2022) - Optional Adjustment
+
+Calibration techniques are sometimes used to correct systematic biases in model predictions. However, for tree species proportions, such adjustments may not always be necessary, as they do not inherently enforce the sum-to-one constraint.
+
+Calibration methods such as those proposed by **Lindgren et al. (2022)** are often applied to correct systematic biases in remote sensing-based predictions. However, for **proportion estimates**, classical calibration techniques may not perform well, as they do not inherently enforce the sum-to-one constraint on predicted proportions. 
+
+```{r}
+training_data_fitted <- get.mv.predicted(rf_model, oob = TRUE) %>%
+  as.data.frame() %>%
+  mutate(across(where(is.numeric), round, digits = 2))
+
+# Fit Correction Models
+mod_s <- lm(rV_s_hat ~ rV_s, data =  data.frame(rV_s = training_data$rV_s, rV_s_hat = training_data_fitted$rV_s))
+mod_p <- lm(rV_p_hat ~ rV_p, data =  data.frame(rV_p = training_data$rV_p, rV_p_hat = training_data_fitted$rV_p))
+mod_d <- lm(rV_d_hat ~ rV_d, data =  data.frame(rV_d = training_data$rV_d, rV_d_hat = training_data_fitted$rV_d))
+
+# Apply Correction Model
+PPyhat_cal = data.frame(
+  rV_s_hat = (PPyhat$rV_s_hat - coef(mod_s)[1]) / coef(mod_s)[2],
+  rV_p_hat = (PPyhat$rV_p_hat - coef(mod_p)[1]) / coef(mod_p)[2],
+  rV_d_hat = (PPyhat$rV_d_hat - coef(mod_d)[1]) / coef(mod_d)[2]
+)
+
+PPyhat_cal[PPyhat_cal < 0] <- 0
+PPyhat_cal[PPyhat_cal > 1] <- 1
+
+# Normalize Rowsto ensure sum up to 1
+normalize_rows <- function(row) {
+  row_sum <- sum(row)
+  if (row_sum > 0) return(row / row_sum) else return(row)
+}
+
+PPyhat_cal <- as.data.frame(t(apply(PPyhat_cal, 1, normalize_rows)))
+PPyhat = PPyhat_cal
+```
+
+## Merge Results
+
+After obtaining predictions, we merge them with the stand Id and observed proportions from validation dataset
+
+```{r}
+validation_results <- vp %>% 
+  select(StandID, rV_s, rV_p, rV_d) %>% 
+  cbind(PPyhat)
+```
+
+## Aggregate by Stand
+
+Since predictions are made at the plot level, we aggregate them to the stand level. This step provides average species proportions for each stand.
+
+```{r}
+stands_results <- validation_results %>% 
+  group_by(StandID) %>%
+    summarize(
+      rV_s = mean(rV_s, na.rm = TRUE),
+      rV_p = mean(rV_p, na.rm = TRUE),
+      rV_d = mean(rV_d, na.rm = TRUE),
+      rV_s_hat = mean(rV_s_hat, na.rm = TRUE),
+      rV_p_hat = mean(rV_p_hat, na.rm = TRUE),
+      rV_d_hat = mean(rV_d_hat, na.rm = TRUE)
+    ) %>%
+  mutate_if(is.numeric, round, digits=2)
+```
+
+## Compute Error Metrics
+
+To evaluate model performance, we compute error metrics such as mean differences, root mean squared error (RMSE), and relative RMSE.
+
+```{r}
+error_metrics <- validation_results %>%
+  summarise(
+    mean_diff_s = mean(rV_s_hat - rV_s, na.rm = TRUE),
+    mean_diff_p = mean(rV_p_hat - rV_p, na.rm = TRUE),
+    mean_diff_d = mean(rV_d_hat - rV_d, na.rm = TRUE),
+    
+    rmse_s = sqrt(mean((rV_s_hat - rV_s)^2, na.rm = TRUE)),
+    rmse_p = sqrt(mean((rV_p_hat - rV_p)^2, na.rm = TRUE)),
+    rmse_d = sqrt(mean((rV_d_hat - rV_d)^2, na.rm = TRUE)),
+    
+    Rrmse_s = rmse_s / mean(rV_s, na.rm = TRUE),
+    Rrmse_p = rmse_p / mean(rV_p, na.rm = TRUE),
+    Rrmse_d = rmse_d / mean(rV_d, na.rm = TRUE)
+  ) %>%
+  mutate(across(where(is.numeric), round, digits = 2))
+
+print(error_metrics)
+```
+
+## Plot Observed vs Predicted
+```{r}
+
+# Reshape for ggplot
+stands_results_long <- stands_results %>%
+  pivot_longer(cols = c(rV_s, rV_p, rV_d), names_to = "species", values_to = "observed") %>%
+  pivot_longer(cols = c(rV_s_hat, rV_p_hat, rV_d_hat), names_to = "species_hat", values_to = "predicted") %>%
+  filter(gsub("_hat", "", species_hat) == species) %>%
+  mutate(species = factor(species, levels = c("rV_s", "rV_p", "rV_d"), labels = c("Spruce", "Pine", "Deciduous")))
+
+species_colors <- c("Spruce" = "red", "Pine" = "green", "Deciduous" = "blue")
+
+ggplot(stands_results_long, aes(x = observed, y = predicted, color = species)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", se = FALSE, linetype = "solid", size = 1) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "black") +
+  xlim(0, 1) + ylim(0, 1) +
+  facet_wrap(~species, scales = "free", nrow = 1) +
+  scale_color_manual(values = species_colors) +
+  labs(
+    title = "Observed vs Predicted Species Proportions",
+    x = "Observed Proportion",
+    y = "Predicted Proportion",
+    color = "Species"
+  ) +
+  theme_minimal()
+```
+
+## Save Results
+```{r, eval=FALSE}
+# write.csv(validation_results, store_path, row.names = FALSE)
+```
+
+## References
+
+Candelas Bielza, J., Noordermeer, L., Næsset, E., Gobakken, T., Breidenbach, J., & Ørka, H. O. (2024). Predicting tree species composition using airborne laser scanning and multispectral data in boreal forests. Science of Remote Sensing, 100154. https://doi.org/10.1016/j.srs.2024.100154
+
+Candelas Bielza, J., Noordermeer, L., Næsset, E., Gobakken, T., Breidenbach, J., & Ørka, H. O. (pending publication). Predicting tree species composition in boreal forests from remotely sensed data: a comparison of modeling techniques (on request).
+
+Lindgren, N., Nyström, K., Saarela, S., Olsson, H., & Ståhl, G. (2022). Importance of Calibration for Improving the Efficiency of Data Assimilation for Predicting Forest Characteristics. Remote Sensing, 14(18), Article 18. https://doi.org/10.3390/rs14184627
