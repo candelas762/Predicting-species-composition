@@ -78,17 +78,37 @@ Variable selection and parameter optimization is encouraged but for simplicity o
 ```{r}
 set.seed(123)
 rf_model <- rfsrc(get.mv.formula(c("rV_s", "rV_p", "rV_d")), data = training_data)
-```
 
-## Predict on Validation Data
+# Predict on Validation Data
+# Once the model is trained, we apply it to the validation dataset to generate predictions.
 
-Once the model is trained, we apply it to the validation dataset to generate predictions.
-
-```{r}
 PPyhat <- predict(rf_model, newdata = vp) %>% 
   get.mv.predicted() %>% 
   as.data.frame() %>% 
   rename_with(~ c("rV_s_hat", "rV_p_hat", "rV_d_hat"), c("rV_s", "rV_p", "rV_d"))
+```
+
+## Option to train Dirichlet Model
+
+Dirichlet is a parametric modeling approach specifically designed for compositional data that allows to model and predict multiple response variables simultaneously. 
+
+```{r}
+# Define proportions for Dirichlet
+Y_boot <- DR_data(Y_boot)
+
+# Formula
+# unique(unname(unlist(vars)))
+form  = paste("Y_boot ~", paste(vars[[1]], collapse = "+"),"|",
+              paste(vars[[2]], collapse = "+"),"|",
+              paste(vars[[3]], collapse = "+"))
+# Model
+mod  = DirichReg(formula(form), data = X_boot , model = "common")
+
+# Predict
+PPyhat  = predict(mod , newdata = test_data) %>%
+  as.data.frame() %>%
+  mutate_if(is.numeric, round, digits=2) %>%
+  rename_with(~c("rV_s_hat", "rV_p_hat", "rV_d_hat"), c("V1", "V2", "V3"))
 ```
 
 ## Classical Calibration (Lindgren et al., 2022) - Optional Adjustment
